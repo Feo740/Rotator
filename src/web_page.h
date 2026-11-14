@@ -21,11 +21,17 @@ const char index_html[] PROGMEM = R"rawliteral(
     .btn-hold.active { background: #f44336; color: #fff; }
     label { display: block; margin-top: 12px; }
     input[type=range] { width: 100%; }
+        .btn-row { margin-top: 16px; }
+    .btn-save { background: #2196f3; color: white; width: 96%; display: block; }
+    .btn-load { background: #9e9e9e; color: white; width: 96%; display: block; margin-top: 6px; }
+    #pos-line { font-weight: bold; margin: 4px 0 8px; font-size: 15px; }
+
   </style>
 </head>
 <body>
   <div class="controls">
     <h3>Rotator Control</h3>
+    <div id="pos-line">Позиция: 0.0 град (пределы 0–360)</div>
 
     <button id="btn-cw" class="btn-cw">CW (По часовой)</button>
     <button id="btn-ccw" class="btn-ccw">CCW (Против)</button>
@@ -38,7 +44,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     <div class="switch-row">
       <span>Микрошаг</span>
       <label class="switch">
-        <input type="checkbox" id="microstep" onchange="send('micro', this.checked ? 1 : 0)">
+        <input type="checkbox" id="microstep" onchange="send('micro', this.checked ? 1 : 0); syncCurrent()">
         <span class="slider-sw"></span>
       </label>
     </div>
@@ -60,6 +66,10 @@ const char index_html[] PROGMEM = R"rawliteral(
       <label>Угол сканирования, град. <span id="sangle-val">90</span></label>
       <input type="range" id="sangle" min="45" max="270" value="90" step="1">
     </div>
+      <div class="btn-row">
+      <button id="btn-save" class="btn-save">Сохранить как базовые</button>
+      <button id="btn-load" class="btn-load">Загрузить базовые</button>
+    </div>
   </div>
 
 
@@ -71,6 +81,23 @@ const char index_html[] PROGMEM = R"rawliteral(
   ws.onmessage = function(evt) {
       try {
         var m = JSON.parse(evt.data);
+        if (m.cmd === 'params') {
+          document.getElementById('angle').value  = m.angle;
+          document.getElementById('angle-val').innerText  = m.angle;
+          document.getElementById('ustep').value  = m.ustep;
+          document.getElementById('ustep-val').innerText  = (m.ustep / 10).toFixed(1);
+          document.getElementById('microstep').checked = m.micro == 1;
+          document.getElementById('sspeed').value = m.sspeed;
+          document.getElementById('sspeed-val').innerText = m.sspeed;
+          document.getElementById('sangle').value = m.sangle;
+          document.getElementById('sangle-val').innerText = m.sangle;
+        }
+
+        if (m.cmd === 'pos') {
+          document.getElementById('pos-line').innerText =
+            'Позиция: ' + m.val.toFixed(1) + ' град (пределы 0–360)';
+        }
+
         if (m.cmd === 'holdState') {
           document.getElementById('btn-hold').classList.toggle('active', m.val == 1);
         }
@@ -102,6 +129,13 @@ const char index_html[] PROGMEM = R"rawliteral(
     send(cmd, val);
   }
 
+    function syncCurrent() {
+    var micro = document.getElementById('microstep').checked;
+    if (micro) send('ustep', parseInt(document.getElementById('ustep').value) / 10);
+    else       send('angle', parseInt(document.getElementById('angle').value));
+  }
+
+
   function bindButtons() {
     document.getElementById('btn-cw').addEventListener('click', function(e) {
       e.preventDefault(); sendClick('cw');
@@ -116,8 +150,17 @@ const char index_html[] PROGMEM = R"rawliteral(
       var on = btn.classList.toggle('active');
       send('scan', on ? 1 : 0);
     });
+    // HOLD — тумблер с фиксацией
     document.getElementById('btn-hold').addEventListener('click', function(e) {
-      e.preventDefault(); send('hold', 0);
+      e.preventDefault();
+      var on = this.classList.toggle('active');
+      send('hold', on ? 1 : 0);
+    });
+    document.getElementById('btn-save').addEventListener('click', function(e) {
+      e.preventDefault(); send('saveParams', 0);
+    });
+    document.getElementById('btn-load').addEventListener('click', function(e) {
+      e.preventDefault(); send('loadParams', 0);
     });
 
     // Ползунки сканирования — шлют значение сразу при каждом сдвиге
@@ -136,12 +179,15 @@ const char index_html[] PROGMEM = R"rawliteral(
     var angle = document.getElementById('angle');
     angle.addEventListener('input', function(e) {
       document.getElementById('angle-val').innerText = e.target.value;
+      send('angle', parseInt(e.target.value));
     });
 
     var ustep = document.getElementById('ustep');
     ustep.addEventListener('input', function(e) {
       document.getElementById('ustep-val').innerText = (parseInt(e.target.value) / 10).toFixed(1);
+      send('ustep', parseInt(e.target.value) / 10);
     });
+
   }
 
   bindButtons();

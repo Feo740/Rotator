@@ -20,6 +20,13 @@ bool  microMode    = false;   // режим микрошага (для лога/
 
 bool  holdMode = false;
 
+// --- Отправка текущей позиции на страницу ---
+void sendPos() {
+  char buf[64];
+  snprintf(buf, sizeof(buf), "{\"cmd\":\"pos\",\"val\":%.1f}", posDeg);
+  ws.textAll(buf);
+}
+
 // --- Сканирование ---
 bool     scanning  = false;
 float    scanSpeed = 10.0;   // град/сек
@@ -30,11 +37,28 @@ int      scanDir   = 1;      // 1 = вперёд, -1 = назад
 uint32_t lastScanMs = 0;
 
 void scanStart() {
+  float half = scanAngle / 2.0f;
+
+  // --- Защита: окно сканирования целиком внутри 0..360 ---
+  float center = posDeg;
+  bool  clamped = false;
+  if (center - half < POS_MIN) { center = POS_MIN + half; clamped = true; }
+  if (center + half > POS_MAX) { center = POS_MAX - half; clamped = true; }
+  scanCenterPos = center;
+
+  if (clamped) {
+    Serial.printf("[SAFE] Окно сканирования прижато к границе: %.1f..%.1f град\n",
+                  center - half, center + half);
+    // старт с края окна внутрь — границу не задеваем
+    if (posDeg < center) { scanPos = -half; scanDir = 1;  motorSetDir(true);  }
+    else                 { scanPos =  half; scanDir = -1; motorSetDir(false); }
+  } else {
+    scanPos = 0.0f;
+    scanDir = 1;
+    motorSetDir(true);
+  }
+
   scanning = true;
-  scanPos = 0.0;
-  scanCenterPos = posDeg;              // запоминаем, от какой точки начали
-  scanDir = 1;
-  motorSetDir(true);
   pulseStart(degPerSecToFreq(scanSpeed));
   Serial.printf("[SCAN] вкл. режим сканирования скорость %.0f град/сек, угол %.0f град\n",
                 scanSpeed, scanAngle);
@@ -51,8 +75,13 @@ void scanUpdateParams() {
     scanApplySpeed();                  // частота STEP меняется на лету
     Serial.printf("[SCAN] новые параметры: скорость %.0f град/сек, угол %.0f град\n",
                   scanSpeed, scanAngle);
-    // если положение вышло за новый размах — вернём в пределы
+
     float half = scanAngle / 2.0f;
+    // --- Защита: абсолютная позиция не выходит за пределы ---
+    float absPos = scanCenterPos + scanPos;
+    if (absPos > POS_MAX) scanPos = POS_MAX - scanCenterPos;
+    if (absPos < POS_MIN) scanPos = POS_MIN - scanCenterPos;
+    // и не выходит за новый размах
     if (scanPos > half)  scanPos = half;
     if (scanPos < -half) scanPos = -half;
   }
@@ -83,6 +112,7 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
   if (type == WS_EVT_CONNECT) {
     Serial.printf("[WS] Client #%u connected\n", client->id());
     loadBaseParams(true);   // страница при подключении получает актуальные параметры
+    sendPos();              // и текущую позицию вала
     return;
   }
   if (type == WS_EVT_DATA) {
@@ -122,6 +152,7 @@ void setup() {
   motorInit();
   motorEnable(true);       // включаем драйвер: вал удерживается током обмоток
   Serial.println("[MOTOR] Готов (STEP/DIR/EN)");
+  Serial.println("[SAFE] Пределы поворота 0..360 град, старт с позиции 0");
 
   WiFi.softAP(ssid, password);
   WiFi.setSleep(false);
@@ -162,16 +193,23 @@ void loop() {
       scanPos = half;
       scanDir = -1;
       scanReverse(false);
-      Serial.printf("[SCAN] край +%.0f град — разворот назад (скорость %.0f град/сек)\n",
-                    half, scanSpeed);
+      Serial.printf("[SCAN] край %.1f град — разворот назад (скорость %.0f град/сек)\n",
+                    scanCenterPos + half, scanSpeed);
     } else if (scanDir == -1 && scanPos <= -half) { // только при движении назад
       scanPos = -half;
       scanDir = 1;
       scanReverse(true);
-      Serial.printf("[SCAN] край -%.0f град — разворот вперёд (скорость %.0f град/сек)\n",
-                    half, scanSpeed);
+      Serial.printf("[SCAN] край %.1f град — разворот вперёд (скорость %.0f град/сек)\n",
+                    scanCenterPos - half, scanSpeed);
     }
   } else {
     lastScanMs = millis();
+  }
+
+  // --- Позиция на страницу каждые 0.5 с ---
+  static uint32_t lastPosMs = 0;
+  if (millis() - lastPosMs >= 500) {
+    lastPosMs = millis();
+    sendPos();
   }
 }
