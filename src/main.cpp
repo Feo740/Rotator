@@ -3,6 +3,9 @@
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include "web_page.h"      // <-- страница теперь здесь
+#include <Preferences.h>
+Preferences prefs;
+
 
 
 // --- Настройки Wi‑Fi ---
@@ -13,8 +16,13 @@ const char* password = "12345678";
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 
+int   currentAngle = 5;
+float currentUstep = 0.5f;
 
 bool holdMode = false;
+
+
+
 
 
 
@@ -96,14 +104,54 @@ void holdOn() {
   Serial.println("[HOLD] вкл. удержание");
 }
 
+// --- Базовые параметры (NVS) ---
+void saveBaseParams() {
+  prefs.begin("rotator", false);          // false = режим записи
+  prefs.putInt("angle",  currentAngle);
+  prefs.putInt("ustep",  (int)(currentUstep * 10));
+  prefs.putBool("micro", microMode);
+  prefs.putInt("sspeed", (int)scanSpeed);
+  prefs.putInt("sangle", (int)scanAngle);
+  prefs.end();
+  Serial.println("[NVS] Параметры сохранены как базовые");
+}
 
-// --- Обработчики ---
+void loadBaseParams(bool toSerialOnly) {
+  prefs.begin("rotator", true);           // true = только чтение
+  int a  = prefs.getInt("angle",  5);     // значение по умолчанию, если пусто
+  int u  = prefs.getInt("ustep",  5);
+  bool m = prefs.getBool("micro", false);
+  int sp = prefs.getInt("sspeed", 10);
+  int sa = prefs.getInt("sangle", 90);
+  prefs.end();
+
+  // применяем к состоянию платы
+  currentAngle = a;
+  currentUstep = u / 10.0f;
+  microMode    = m;
+  scanSpeed    = sp;
+  scanAngle    = sa;
+
+  // и отправляем на страницу, чтобы ползунки встали на место
+  char buf[160];
+  snprintf(buf, sizeof(buf),
+           "{\"cmd\":\"params\",\"angle\":%d,\"ustep\":%d,\"micro\":%d,\"sspeed\":%d,\"sangle\":%d}",
+           a, u, m ? 1 : 0, sp, sa);
+  ws.textAll(buf);
+
+  if (!toSerialOnly) {
+    Serial.printf("[NVS] Загружены базовые: угол %d, микрошаг %.1f, скорость %d, размах %d\n",
+                  a, currentUstep, sp, sa);
+  }
+}
+
 void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
                AwsEventType type, void *arg, uint8_t *data, size_t len) {
   if (type == WS_EVT_CONNECT) {
-  Serial.printf("[WS] Client #%u connected\n", client->id());
-  return;
-}
+    Serial.printf("[WS] Client #%u connected\n", client->id());
+    loadBaseParams(true);   // страница при подключении получает актуальные параметры
+    return;
+  }
   if (type == WS_EVT_DATA) {
     AwsFrameInfo *info = (AwsFrameInfo*)arg;
     if (info->final && info->opcode == WS_TEXT) {
@@ -111,7 +159,6 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
       String msg = String((char*)data);
       Serial.println("WS: " + msg);
 
-      // Парсим JSON
       DynamicJsonDocument doc(256);
       DeserializationError err = deserializeJson(doc, msg);
       if (!err) {
@@ -121,18 +168,22 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
         if (cmd == "cw")        { holdOff(false); rotate(val, true); }
         else if (cmd == "ccw")  { holdOff(false); rotate(val, false); }
         else if (cmd == "scan") { holdOff(false); val ? scanStart() : scanStop(); }
-        else if (cmd == "hold") {
-          if (val) { holdOn(); }
-          else     { holdOff(true); }
-        }
+        else if (cmd == "hold") { val ? holdOn() : holdOff(true); }
         else if (cmd == "sspeed") { scanSpeed = val; scanUpdateParams(); }
         else if (cmd == "sangle") { scanAngle = val; scanUpdateParams(); }
-        else if (cmd == "micro") { microMode = (val == 1);
-                                   Serial.printf("[MICRO] %s\n", microMode ? "ON" : "OFF"); }
+        else if (cmd == "micro")  { microMode = (val == 1);
+                                    Serial.printf("[MICRO] %s\n", microMode ? "ON" : "OFF"); }
+        else if (cmd == "angle")  { currentAngle = (int)val; }
+        else if (cmd == "ustep")  { currentUstep = val; }
+        else if (cmd == "saveParams") { saveBaseParams(); }
+        else if (cmd == "loadParams") { loadBaseParams(false); }
       }
     }
   }
 }
+
+
+
 
 void setup() {
   Serial.begin(115200);
@@ -147,6 +198,7 @@ void setup() {
     Serial.println("[HTTP] Page requested");
     request->send_P(200, "text/html; charset=utf-8", index_html);
   });
+  loadBaseParams(true);   // применяем сохранённые значения без лишнего лога
 
   ws.onEvent(onWsEvent);      // <-- привязка обработчика
   server.addHandler(&ws);     // <-- регистрация WebSocket на /ws
