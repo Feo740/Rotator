@@ -2,6 +2,8 @@
 #include <WiFi.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
+#include "web_page.h"      // <-- страница теперь здесь
+
 
 // --- Настройки Wi‑Fi ---
 const char* ssid = "Rotator";
@@ -11,9 +13,66 @@ const char* password = "12345678";
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 
-int motorSpeed = 50;      // 0–100%
-int scanAngle = 60;       // градусы
-bool isHolding = false;
+
+bool holdMode = false;
+
+
+
+void holdOff(bool byUser) {
+  if (holdMode) {
+    holdMode = false;
+    Serial.println(byUser ? "[HOLD] выкл. удержание" : "[HOLD] удержание снято командой движения");
+    ws.textAll("{\"cmd\":\"holdState\",\"val\":0}"); // снять фиксацию кнопки HOLD на странице
+  }
+}
+
+// --- Состояние ---
+float motorSpeed = 50.0;   // оставим на будущее, в град/сек
+float lastAngle = 0.0;     // последний выполненный угол
+bool  microMode = false;   // режим микрошага (для лога/будущей логики)
+// --- Сканирование ---
+bool   scanning    = false;
+float  scanSpeed   = 10.0;   // град/сек
+float  scanAngle   = 90.0;   // полный размах, град
+float  scanPos     = 0.0;    // виртуальное положение, град (от -angle/2 до +angle/2)
+int    scanDir     = 1;      // 1 = вперёд, -1 = назад
+uint32_t lastScanMs = 0;
+
+void scanStart() {
+  scanning = true;
+  scanPos = 0.0;
+  scanDir = 1;
+  Serial.printf("[SCAN] вкл. режим сканирования скорость %.0f град/сек, угол %.0f град\n",
+                scanSpeed, scanAngle);
+}
+
+void scanStop() {
+  scanning = false;
+  Serial.println("[SCAN] выкл. режим сканирования");
+}
+
+void scanUpdateParams() {
+  if (scanning) {
+    Serial.printf("[SCAN] новые параметры: скорость %.0f град/сек, угол %.0f град\n",
+                  scanSpeed, scanAngle);
+    // если положение вышло за новый размах — вернём в пределы
+    float half = scanAngle / 2.0;
+    if (scanPos > half)  scanPos = half;
+    if (scanPos < -half) scanPos = -half;
+  }
+}
+
+
+void rotate(float angle, bool cw) {
+  if (scanning) {
+    scanning = false;
+    Serial.println("[SCAN] выкл. — ручное управление");
+    ws.textAll("{\"cmd\":\"scanState\",\"val\":0}");
+  }
+  Serial.printf("[MOTOR] Повернул на %.1f град. %s\n", angle, cw ? "CW" : "CCW");
+}
+
+
 
 // --- Заглушки для управления мотором (сюда позже вставишь TMC2160) ---
 void moveMotor(int speed, int angle, bool cw) {
@@ -26,75 +85,24 @@ void stopMotor() {
   // стоп/удержание
 }
 
-// --- HTML + JS (встроенная страница) ---
-const char index_html[] PROGMEM = R"rawliteral(
-<!DOCTYPE html>
-<html>
-<head>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Rotator Control</title>
-  <style>
-    body { font-family: Arial, sans-serif; padding: 16px; }
-    .controls { max-width: 400px; margin: 0 auto; }
-    button { width: 45%; padding: 12px; font-size: 14px; margin: 4px 2%; }
-    .btn-cw { background: #4caf50; color: white; }
-    .btn-ccw { background: #f44336; color: white; }
-    .btn-scan { background: #2196f3; color: white; }
-    .btn-hold { background: #9e9e9e; color: white; }
-    label { display: block; margin-top: 12px; }
-    input[type=range] { width: 100%; }
-  </style>
-</head>
-<body>
-  <div class="controls">
-    <h3>Rotator Control</h3>
-    <button id="btn-cw" class="btn-cw">CW (По часовой)</button>
-    <button id="btn-ccw" class="btn-ccw">CCW (Против)</button>
-    <button id="btn-scan" class="btn-scan">SCAN (Сканирование)</button>
-    <button id="btn-hold" class="btn-hold">HOLD (Стоп/Удержание)</button>
-
-    <label>Скорость (%): <span id="speed-val">50</span></label>
-    <input type="range" id="speed" min="0" max="100" value="50">
-
-    <label>Угол сканирования (°): <span id="angle-val">60</span></label>
-    <input type="range" id="angle" min="10" max="180" value="60">
-  </div>
-
-  <script>
-    var ws;
-    function init() {
-      ws = new WebSocket('ws://' + location.host + '/ws');
-      ws.onopen = function() { console.log('WS connected'); };
-      ws.onclose = function() { console.log('WS closed'); };
-    }
-    function send(cmd, val) {
-      var msg = JSON.stringify({cmd: cmd, val: val});
-      if(ws && ws.readyState === WebSocket.OPEN) ws.send(msg);
-    }
-
-    document.getElementById('btn-cw').onclick = () => send('cw', 0);
-    document.getElementById('btn-ccw').onclick = () => send('ccw', 0);
-    document.getElementById('btn-scan').onclick = () => send('scan', 0);
-    document.getElementById('btn-hold').onclick = () => send('hold', 0);
-
-    var speed = document.getElementById('speed');
-    speed.oninput = (e) => {
-      document.getElementById('speed-val').innerText = e.target.value;
-      send('speed', parseInt(e.target.value));
-    };
-
-    var angle = document.getElementById('angle');
-    angle.oninput = (e) => {
-      document.getElementById('angle-val').innerText = e.target.value;
-      send('angle', parseInt(e.target.value));
-    };
-  </script>
-</body>
-</html>
-)rawliteral";
+void holdOn() {
+  holdMode = true;
+  stopMotor();
+  if (scanning) {
+    scanning = false;
+    Serial.println("[SCAN] выкл. режим сканирования (HOLD)");
+    ws.textAll("{\"cmd\":\"scanState\",\"val\":0}"); // снять фиксацию кнопки SCAN
+  }
+  Serial.println("[HOLD] вкл. удержание");
+}
 
 // --- Обработчики ---
-void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
+void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
+               AwsEventType type, void *arg, uint8_t *data, size_t len) {
+  if (type == WS_EVT_CONNECT) {
+  Serial.printf("[WS] Client #%u connected\n", client->id());
+  return;
+}
   if (type == WS_EVT_DATA) {
     AwsFrameInfo *info = (AwsFrameInfo*)arg;
     if (info->final && info->opcode == WS_TEXT) {
@@ -107,17 +115,19 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
       DeserializationError err = deserializeJson(doc, msg);
       if (!err) {
         String cmd = doc["cmd"].as<String>();
-        int val = doc["val"];
+        float val  = doc["val"].as<float>();
 
-        if (cmd == "cw") { moveMotor(motorSpeed, scanAngle, true); }
-        else if (cmd == "ccw") { moveMotor(motorSpeed, scanAngle, false); }
-        else if (cmd == "scan") {
-          // Пример: туда‑обратно на scanAngle
-          Serial.println("[SCAN] Start");
+        if (cmd == "cw")        { holdOff(false); rotate(val, true); }
+        else if (cmd == "ccw")  { holdOff(false); rotate(val, false); }
+        else if (cmd == "scan") { holdOff(false); val ? scanStart() : scanStop(); }
+        else if (cmd == "hold") {
+          if (val) { holdOn(); }
+          else     { holdOff(true); }
         }
-        else if (cmd == "hold") { stopMotor(); isHolding = true; }
-        else if (cmd == "speed") { motorSpeed = val; }
-        else if (cmd == "angle") { scanAngle = val; }
+        else if (cmd == "sspeed") { scanSpeed = val; scanUpdateParams(); }
+        else if (cmd == "sangle") { scanAngle = val; scanUpdateParams(); }
+        else if (cmd == "micro") { microMode = (val == 1);
+                                   Serial.printf("[MICRO] %s\n", microMode ? "ON" : "OFF"); }
       }
     }
   }
@@ -128,30 +138,45 @@ void setup() {
   Serial.println("\n[Rotator] Boot");
 
   WiFi.softAP(ssid, password);
-  IPAddress IP = WiFi.softAPIP();
+  WiFi.setSleep(false);
   Serial.print("[Rotator] AP IP: ");
-  Serial.println(IP);
+  Serial.println(WiFi.softAPIP());
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send_P(200, "text/html", index_html);
+    Serial.println("[HTTP] Page requested");
+    request->send_P(200, "text/html; charset=utf-8", index_html);
   });
 
-  server.onNotFound([](AsyncWebServerRequest *request) {
-  Serial.printf("[HTTP] Not found: %s\n", request->url().c_str());
-  request->send(404, "text/plain", "not found");
-});
-
-
-  ws.onEvent(onWsEvent);
-  server.addHandler(&ws);
-
+  ws.onEvent(onWsEvent);      // <-- привязка обработчика
+  server.addHandler(&ws);     // <-- регистрация WebSocket на /ws
   server.begin();
   Serial.println("[Rotator] Web server started");
 }
 
+
 void loop() {
-  static uint32_t tick = 0;
-  tick++;
-  //Serial.printf("[Rotator] Tick %lu\n", tick);
-  delay(500);  // можно убрать, если нужен быстрый loop
+    // --- Виртуальное сканирование ---
+  if (scanning && !holdMode) {
+    uint32_t now = millis();
+    float dt = (now - lastScanMs) / 1000.0f;
+    lastScanMs = now;
+
+    float half = scanAngle / 2.0f;
+    scanPos += scanDir * scanSpeed * dt;
+
+    if (scanDir == 1 && scanPos >= half) {          // только при движении вперёд
+      scanPos = half;
+      scanDir = -1;
+      Serial.printf("[SCAN] край +%.0f град — разворот назад (скорость %.0f град/сек)\n",
+                    half, scanSpeed);
+    } else if (scanDir == -1 && scanPos <= -half) { // только при движении назад
+      scanPos = -half;
+      scanDir = 1;
+      Serial.printf("[SCAN] край -%.0f град — разворот вперёд (скорость %.0f град/сек)\n",
+                    half, scanSpeed);
+    }
+  } else {
+    lastScanMs = millis();
+  }
+
 }
