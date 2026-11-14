@@ -2,13 +2,10 @@
 #include <WiFi.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
-#include "web_page.h"      // <-- страница теперь здесь
-#include <Preferences.h>
-Preferences prefs;
+#include "web_page.h"      // страница здесь
+#include "storage.h"       // NVS-параметры переехали в storage.h/storage.cpp
 
-
-
-// --- Настройки Wi‑Fi ---
+// --- Настройки Wi-Fi ---
 const char* ssid = "Rotator";
 const char* password = "12345678";
 
@@ -18,32 +15,16 @@ AsyncWebSocket ws("/ws");
 
 int   currentAngle = 5;
 float currentUstep = 0.5f;
+bool  microMode    = false;   // режим микрошага (для лога/будущей логики)
 
-bool holdMode = false;
+bool  holdMode = false;
 
-
-
-
-
-
-void holdOff(bool byUser) {
-  if (holdMode) {
-    holdMode = false;
-    Serial.println(byUser ? "[HOLD] выкл. удержание" : "[HOLD] удержание снято командой движения");
-    ws.textAll("{\"cmd\":\"holdState\",\"val\":0}"); // снять фиксацию кнопки HOLD на странице
-  }
-}
-
-// --- Состояние ---
-float motorSpeed = 50.0;   // оставим на будущее, в град/сек
-float lastAngle = 0.0;     // последний выполненный угол
-bool  microMode = false;   // режим микрошага (для лога/будущей логики)
 // --- Сканирование ---
-bool   scanning    = false;
-float  scanSpeed   = 10.0;   // град/сек
-float  scanAngle   = 90.0;   // полный размах, град
-float  scanPos     = 0.0;    // виртуальное положение, град (от -angle/2 до +angle/2)
-int    scanDir     = 1;      // 1 = вперёд, -1 = назад
+bool     scanning  = false;
+float    scanSpeed = 10.0;   // град/сек
+float    scanAngle = 90.0;   // полный размах, град
+float    scanPos   = 0.0;    // виртуальное положение, град (от -angle/2 до +angle/2)
+int      scanDir   = 1;      // 1 = вперёд, -1 = назад
 uint32_t lastScanMs = 0;
 
 void scanStart() {
@@ -70,7 +51,6 @@ void scanUpdateParams() {
   }
 }
 
-
 void rotate(float angle, bool cw) {
   if (scanning) {
     scanning = false;
@@ -80,17 +60,18 @@ void rotate(float angle, bool cw) {
   Serial.printf("[MOTOR] Повернул на %.1f град. %s\n", angle, cw ? "CW" : "CCW");
 }
 
-
-
 // --- Заглушки для управления мотором (сюда позже вставишь TMC2160) ---
-void moveMotor(int speed, int angle, bool cw) {
-  // Здесь будет логика шаговика и TMC2160
-  Serial.printf("[MOTOR] Speed=%d, Angle=%d, CW=%d\n", speed, angle, cw);
-}
-
 void stopMotor() {
   Serial.println("[MOTOR] Stop");
   // стоп/удержание
+}
+
+void holdOff(bool byUser) {
+  if (holdMode) {
+    holdMode = false;
+    Serial.println(byUser ? "[HOLD] выкл. удержание" : "[HOLD] удержание снято командой движения");
+    ws.textAll("{\"cmd\":\"holdState\",\"val\":0}"); // снять фиксацию кнопки HOLD на странице
+  }
 }
 
 void holdOn() {
@@ -104,47 +85,7 @@ void holdOn() {
   Serial.println("[HOLD] вкл. удержание");
 }
 
-// --- Базовые параметры (NVS) ---
-void saveBaseParams() {
-  prefs.begin("rotator", false);          // false = режим записи
-  prefs.putInt("angle",  currentAngle);
-  prefs.putInt("ustep",  (int)(currentUstep * 10));
-  prefs.putBool("micro", microMode);
-  prefs.putInt("sspeed", (int)scanSpeed);
-  prefs.putInt("sangle", (int)scanAngle);
-  prefs.end();
-  Serial.println("[NVS] Параметры сохранены как базовые");
-}
-
-void loadBaseParams(bool toSerialOnly) {
-  prefs.begin("rotator", true);           // true = только чтение
-  int a  = prefs.getInt("angle",  5);     // значение по умолчанию, если пусто
-  int u  = prefs.getInt("ustep",  5);
-  bool m = prefs.getBool("micro", false);
-  int sp = prefs.getInt("sspeed", 10);
-  int sa = prefs.getInt("sangle", 90);
-  prefs.end();
-
-  // применяем к состоянию платы
-  currentAngle = a;
-  currentUstep = u / 10.0f;
-  microMode    = m;
-  scanSpeed    = sp;
-  scanAngle    = sa;
-
-  // и отправляем на страницу, чтобы ползунки встали на место
-  char buf[160];
-  snprintf(buf, sizeof(buf),
-           "{\"cmd\":\"params\",\"angle\":%d,\"ustep\":%d,\"micro\":%d,\"sspeed\":%d,\"sangle\":%d}",
-           a, u, m ? 1 : 0, sp, sa);
-  ws.textAll(buf);
-
-  if (!toSerialOnly) {
-    Serial.printf("[NVS] Загружены базовые: угол %d, микрошаг %.1f, скорость %d, размах %d\n",
-                  a, currentUstep, sp, sa);
-  }
-}
-
+// --- Обработчики ---
 void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
                AwsEventType type, void *arg, uint8_t *data, size_t len) {
   if (type == WS_EVT_CONNECT) {
@@ -173,17 +114,14 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
         else if (cmd == "sangle") { scanAngle = val; scanUpdateParams(); }
         else if (cmd == "micro")  { microMode = (val == 1);
                                     Serial.printf("[MICRO] %s\n", microMode ? "ON" : "OFF"); }
-        else if (cmd == "angle")  { currentAngle = (int)val; }
-        else if (cmd == "ustep")  { currentUstep = val; }
+        else if (cmd == "angle")      { currentAngle = (int)val; }
+        else if (cmd == "ustep")      { currentUstep = val; }
         else if (cmd == "saveParams") { saveBaseParams(); }
         else if (cmd == "loadParams") { loadBaseParams(false); }
       }
     }
   }
 }
-
-
-
 
 void setup() {
   Serial.begin(115200);
@@ -198,17 +136,17 @@ void setup() {
     Serial.println("[HTTP] Page requested");
     request->send_P(200, "text/html; charset=utf-8", index_html);
   });
+
   loadBaseParams(true);   // применяем сохранённые значения без лишнего лога
 
-  ws.onEvent(onWsEvent);      // <-- привязка обработчика
-  server.addHandler(&ws);     // <-- регистрация WebSocket на /ws
+  ws.onEvent(onWsEvent);      // привязка обработчика
+  server.addHandler(&ws);     // регистрация WebSocket на /ws
   server.begin();
   Serial.println("[Rotator] Web server started");
 }
 
-
 void loop() {
-    // --- Виртуальное сканирование ---
+  // --- Виртуальное сканирование ---
   if (scanning && !holdMode) {
     uint32_t now = millis();
     float dt = (now - lastScanMs) / 1000.0f;
@@ -231,5 +169,4 @@ void loop() {
   } else {
     lastScanMs = millis();
   }
-
 }
