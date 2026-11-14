@@ -3,7 +3,8 @@
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include "web_page.h"      // страница здесь
-#include "storage.h"       // NVS-параметры переехали в storage.h/storage.cpp
+#include "storage.h"       // NVS-параметры
+#include "motor.h"         // драйвер TMC2160 (STEP/DIR/EN)
 
 // --- Настройки Wi-Fi ---
 const char* ssid = "Rotator";
@@ -23,47 +24,38 @@ bool  holdMode = false;
 bool     scanning  = false;
 float    scanSpeed = 10.0;   // град/сек
 float    scanAngle = 90.0;   // полный размах, град
-float    scanPos   = 0.0;    // виртуальное положение, град (от -angle/2 до +angle/2)
+float    scanPos   = 0.0;    // смещение от центра сканирования, град
+float    scanCenterPos = 0.0; // позиция вала на момент включения сканирования
 int      scanDir   = 1;      // 1 = вперёд, -1 = назад
 uint32_t lastScanMs = 0;
 
 void scanStart() {
   scanning = true;
   scanPos = 0.0;
+  scanCenterPos = posDeg;              // запоминаем, от какой точки начали
   scanDir = 1;
+  motorSetDir(true);
+  pulseStart(degPerSecToFreq(scanSpeed));
   Serial.printf("[SCAN] вкл. режим сканирования скорость %.0f град/сек, угол %.0f град\n",
                 scanSpeed, scanAngle);
 }
 
 void scanStop() {
   scanning = false;
+  pulseStop();
   Serial.println("[SCAN] выкл. режим сканирования");
 }
 
 void scanUpdateParams() {
   if (scanning) {
+    scanApplySpeed();                  // частота STEP меняется на лету
     Serial.printf("[SCAN] новые параметры: скорость %.0f град/сек, угол %.0f град\n",
                   scanSpeed, scanAngle);
     // если положение вышло за новый размах — вернём в пределы
-    float half = scanAngle / 2.0;
+    float half = scanAngle / 2.0f;
     if (scanPos > half)  scanPos = half;
     if (scanPos < -half) scanPos = -half;
   }
-}
-
-void rotate(float angle, bool cw) {
-  if (scanning) {
-    scanning = false;
-    Serial.println("[SCAN] выкл. — ручное управление");
-    ws.textAll("{\"cmd\":\"scanState\",\"val\":0}");
-  }
-  Serial.printf("[MOTOR] Повернул на %.1f град. %s\n", angle, cw ? "CW" : "CCW");
-}
-
-// --- Заглушки для управления мотором (сюда позже вставишь TMC2160) ---
-void stopMotor() {
-  Serial.println("[MOTOR] Stop");
-  // стоп/удержание
 }
 
 void holdOff(bool byUser) {
@@ -76,11 +68,11 @@ void holdOff(bool byUser) {
 
 void holdOn() {
   holdMode = true;
-  stopMotor();
+  stopMotor();   // импульсы остановлены; EN остаётся включён — вал удерживается током бесплатно
   if (scanning) {
     scanning = false;
     Serial.println("[SCAN] выкл. режим сканирования (HOLD)");
-    ws.textAll("{\"cmd\":\"scanState\",\"val\":0}"); // отщёлкнуть кнопку SCAN на странице
+    ws.textAll("{\"cmd\":\"scanState\",\"val\":0}");
   }
   Serial.println("[HOLD] вкл. удержание");
 }
@@ -127,6 +119,10 @@ void setup() {
   Serial.begin(115200);
   Serial.println("\n[Rotator] Boot");
 
+  motorInit();
+  motorEnable(true);       // включаем драйвер: вал удерживается током обмоток
+  Serial.println("[MOTOR] Готов (STEP/DIR/EN)");
+
   WiFi.softAP(ssid, password);
   WiFi.setSleep(false);
   Serial.print("[Rotator] AP IP: ");
@@ -146,7 +142,13 @@ void setup() {
 }
 
 void loop() {
-  // --- Виртуальное сканирование ---
+  // --- Ручной поворот: остановка по времени (частота известна точно) ---
+  if (moving) {
+    float needMs = ((float)stepsToGo / (float)ROTATE_FREQ) * 1000.0f;
+    if (millis() - rotStartMs >= needMs) stopMotor();
+  }
+
+  // --- Сканирование ---
   if (scanning && !holdMode) {
     uint32_t now = millis();
     float dt = (now - lastScanMs) / 1000.0f;
@@ -154,15 +156,18 @@ void loop() {
 
     float half = scanAngle / 2.0f;
     scanPos += scanDir * scanSpeed * dt;
+    posDeg = scanCenterPos + scanPos;   // реальная позиция вала
 
     if (scanDir == 1 && scanPos >= half) {          // только при движении вперёд
       scanPos = half;
       scanDir = -1;
+      scanReverse(false);
       Serial.printf("[SCAN] край +%.0f град — разворот назад (скорость %.0f град/сек)\n",
                     half, scanSpeed);
     } else if (scanDir == -1 && scanPos <= -half) { // только при движении назад
       scanPos = -half;
       scanDir = 1;
+      scanReverse(true);
       Serial.printf("[SCAN] край -%.0f град — разворот вперёд (скорость %.0f град/сек)\n",
                     half, scanSpeed);
     }
