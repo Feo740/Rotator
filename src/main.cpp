@@ -91,10 +91,11 @@ void holdOn() {
   if (scanning) {
     scanning = false;
     Serial.println("[SCAN] выкл. режим сканирования (HOLD)");
-    ws.textAll("{\"cmd\":\"scanState\",\"val\":0}"); // снять фиксацию кнопки SCAN
+    ws.textAll("{\"cmd\":\"scanState\",\"val\":0}"); // отщёлкнуть кнопку SCAN на странице
   }
   Serial.println("[HOLD] вкл. удержание");
 }
+
 
 // --- Обработчики ---
 void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
